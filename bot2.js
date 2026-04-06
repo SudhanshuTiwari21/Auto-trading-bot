@@ -57,6 +57,8 @@ class AutoTradingBot2 {
                 0.01,
                 parseFloat(process.env.MIN_NOTIONAL_USDT || '1')
             );
+            // When true: run checkAndReplenishBuys once per completed cycle (reduces overlap with same-cycle self-matches)
+            this.REPLENISH_AFTER_CYCLE_ONLY = process.env.REPLENISH_AFTER_CYCLE_ONLY === 'true';
 
             // Add cycle tracking for random order quantities
             this.currentCycle = 0;
@@ -71,6 +73,9 @@ class AutoTradingBot2 {
                 const testBalance = parseFloat(process.env.TEST_BALANCE || '100');
                 console.log('✓ Test Mode enabled');
                 console.log(`✓ Test Balance: ${testBalance} USDT`);
+            }
+            if (this.REPLENISH_AFTER_CYCLE_ONLY) {
+                console.log('✓ Replenish: after each full cycle only (REPLENISH_AFTER_CYCLE_ONLY=true)');
             }
 
             // Setup graceful shutdown
@@ -198,6 +203,72 @@ class AutoTradingBot2 {
         const perLeg = Math.min(totalEventBudget / n, maxLegUsd);
         if (perLeg < minNotional) return null;
         return { n, perLeg };
+    }
+
+    /** When first leg order is cancelled or replaced — keeps ourMainBuyOrderIds accurate for replenish. */
+    removeFirstLegOrderTracking(action, orderId) {
+        if (orderId == null) return;
+        const id = String(orderId);
+        if (action === 'buy') {
+            this.ourMainBuyOrderIds.delete(id);
+            this.ourBuyOrderIds.delete(id);
+        } else if (action === 'sell') {
+            this.ourSellOrderIds.delete(id);
+        }
+    }
+
+    replaceFirstLegOrderId(action, oldId, newId, priceStr) {
+        if (oldId == null || newId == null) return;
+        const o = String(oldId);
+        const n = String(newId);
+        if (o === n) return;
+        if (action === 'buy') {
+            this.ourMainBuyOrderIds.delete(o);
+            this.ourBuyOrderIds.delete(o);
+            this.ourMainBuyOrderIds.add(n);
+            this.ourBuyOrderIds.add(n);
+            if (priceStr != null) {
+                const p = parseFloat(priceStr);
+                if (!Number.isNaN(p)) {
+                    this.ourBuyPrice = p;
+                    this.ourMainBuyPrice = p;
+                }
+            }
+        } else if (action === 'sell') {
+            this.ourSellOrderIds.delete(o);
+            this.ourSellOrderIds.add(n);
+            if (priceStr != null) {
+                const p = parseFloat(priceStr);
+                if (!Number.isNaN(p)) {
+                    this.ourSellPrice = p;
+                    this.ourMainSellPrice = p;
+                }
+            }
+        }
+    }
+
+    replaceMatchingLegOrderId(matchingSide, oldId, newId) {
+        if (oldId == null || newId == null) return;
+        const o = String(oldId);
+        const n = String(newId);
+        if (o === n) return;
+        if (matchingSide === 'buy') {
+            this.ourBuyOrderIds.delete(o);
+            this.ourBuyOrderIds.add(n);
+        } else {
+            this.ourSellOrderIds.delete(o);
+            this.ourSellOrderIds.add(n);
+        }
+    }
+
+    removeMatchingLegTracking(matchingSide, orderId) {
+        if (orderId == null) return;
+        const id = String(orderId);
+        if (matchingSide === 'buy') {
+            this.ourBuyOrderIds.delete(id);
+        } else {
+            this.ourSellOrderIds.delete(id);
+        }
     }
 
     async getOrderBook(symbol) {
@@ -913,9 +984,10 @@ class AutoTradingBot2 {
             // Execute the trade action
             const success = await this.executeTradeAction(action, symbol);
             
-            // After any trade attempt, check if our tracked buy orders were filled
-            // and, if so, replenish buy ladder around our last buy price.
-            await this.checkAndReplenishBuys(symbol);
+            // Replenish after main buy fill — or once per cycle if REPLENISH_AFTER_CYCLE_ONLY=true
+            if (!this.REPLENISH_AFTER_CYCLE_ONLY) {
+                await this.checkAndReplenishBuys(symbol);
+            }
 
             // Also log potential defence opportunities based on current order book
             // relative to our tracked buy/sell prices, WITHOUT placing extra orders yet.
@@ -940,6 +1012,10 @@ class AutoTradingBot2 {
                 if (this.ordersInCurrentCycle >= this.targetOrdersInCurrentCycle) {
                     console.log(`\n=== Completed Cycle #${this.currentCycle} (${this.ordersInCurrentCycle}/${this.targetOrdersInCurrentCycle} orders) ===`);
                     
+                    if (this.REPLENISH_AFTER_CYCLE_ONLY) {
+                        await this.checkAndReplenishBuys(symbol);
+                    }
+
                     // Reset for next cycle
                     this.targetOrdersInCurrentCycle = 0;
                     this.ordersInCurrentCycle = 0;
@@ -993,6 +1069,10 @@ class AutoTradingBot2 {
                 if (this.ordersInCurrentCycle >= this.targetOrdersInCurrentCycle) {
                     console.log(`\n=== Completed Cycle #${this.currentCycle} (${this.ordersInCurrentCycle}/${this.targetOrdersInCurrentCycle} orders) ===`);
                     
+                    if (this.REPLENISH_AFTER_CYCLE_ONLY) {
+                        await this.checkAndReplenishBuys(symbol);
+                    }
+
                     // Reset for next cycle
                     this.targetOrdersInCurrentCycle = 0;
                     this.ordersInCurrentCycle = 0;

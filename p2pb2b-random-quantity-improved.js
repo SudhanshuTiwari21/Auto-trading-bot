@@ -164,8 +164,8 @@ class RandomQuantityP2PB2BBot extends AutoTradingBot2 {
             if (!matchingOrderResult || !matchingOrderResult.orderId) {
                 console.error('Failed to create matching order');
 
-                // Try to cancel the first order
                 console.log('Cancelling the first order...');
+                this.removeFirstLegOrderTracking(action, orderResult.orderId);
                 await this.exchange.cancelOrder(orderResult.orderId, symbol.replace('/', '_'));
 
                 return false;
@@ -219,12 +219,12 @@ class RandomQuantityP2PB2BBot extends AutoTradingBot2 {
 
                     // If first order is not filled, cancel and recreate it
                     if (!firstOrderFilled) {
+                        const prevFirstId = String(orderResult.orderId);
                         console.log('Cancelling the first order...');
                         await this.exchange.cancelOrder(orderResult.orderId, symbol.replace('/', '_'));
 
-                        // Set price to exact ask price for better fill probability       
                         const newPrice = newAskPrice.toFixed(6);
-                        console.log(`Setting new price to ${newPrice} (at current ask)`); 
+                        console.log(`Setting new price to ${newPrice} (at current ask)`);
 
                         console.log(`Creating new ${action} order with improved price...`);
                         const newOrderResult = await this.exchange.createOrder(
@@ -236,37 +236,41 @@ class RandomQuantityP2PB2BBot extends AutoTradingBot2 {
 
                         if (!newOrderResult || !newOrderResult.orderId) {
                             console.error('Failed to create new first order');
+                            this.removeFirstLegOrderTracking(action, prevFirstId);
                             return false;
                         }
 
                         console.log(`New first order created successfully with ID: ${newOrderResult.orderId}`);
                         orderResult.orderId = newOrderResult.orderId;
+                        this.replaceFirstLegOrderId(action, prevFirstId, orderResult.orderId, newPrice);
                     }
 
                     // If matching order is not filled, cancel and recreate it
                     if (!matchingOrderFilled) {
+                        const prevMatchId = String(matchingOrderResult.orderId);
                         console.log('Cancelling the matching order...');
                         await this.exchange.cancelOrder(matchingOrderResult.orderId, symbol.replace('/', '_'));
 
-                        // Set price to exact ask price for better fill probability       
                         const newPrice = newAskPrice.toFixed(6);
-                        console.log(`Setting new price to ${newPrice} (at current ask)`); 
+                        console.log(`Setting new price to ${newPrice} (at current ask)`);
 
-                        console.log(`Creating new matching ${matchingSide} order...`);    
-                        const newMatchingOrderResult = await this.exchange.createOrder(   
+                        console.log(`Creating new matching ${matchingSide} order...`);
+                        const newMatchingOrderResult = await this.exchange.createOrder(
                             symbol,
                             matchingSide,
                             tokenAmount,
                             newPrice
                         );
 
-                        if (!newMatchingOrderResult || !newMatchingOrderResult.orderId) { 
+                        if (!newMatchingOrderResult || !newMatchingOrderResult.orderId) {
                             console.error('Failed to create new matching order');
+                            this.removeMatchingLegTracking(matchingSide, prevMatchId);
                             return false;
                         }
 
                         console.log(`New matching order created successfully with ID: ${newMatchingOrderResult.orderId}`);
-                        matchingOrderResult.orderId = newMatchingOrderResult.orderId;     
+                        matchingOrderResult.orderId = newMatchingOrderResult.orderId;
+                        this.replaceMatchingLegOrderId(matchingSide, prevMatchId, matchingOrderResult.orderId);
                     }
                 }
                 // If orders are not filled after 5 attempts, try to cancel and recreate with better prices
@@ -274,7 +278,9 @@ class RandomQuantityP2PB2BBot extends AutoTradingBot2 {
 {
                     console.log('Orders not filled after 5 attempts, adjusting prices...');
 
-                    // Cancel both orders
+                    const prevFirstId = String(orderResult.orderId);
+                    const prevMatchId = String(matchingOrderResult.orderId);
+
                     console.log('Cancelling both orders...');
                     if (!firstOrderFilled) {
                         await this.exchange.cancelOrder(orderResult.orderId, symbol.replace('/', '_'));
@@ -283,15 +289,12 @@ class RandomQuantityP2PB2BBot extends AutoTradingBot2 {
                         await this.exchange.cancelOrder(matchingOrderResult.orderId, symbol.replace('/', '_'));
                     }
 
-                    // Get fresh market price
-                    const newMarketPrice = await this.exchange.getMarketPrice(symbol);    
+                    const newMarketPrice = await this.exchange.getMarketPrice(symbol);
 
-                    // Set more aggressive prices - use exact ask price
                     const newPrice = parseFloat(newMarketPrice.ask).toFixed(6);
-                    console.log(`Setting new price to ${newPrice} (at current ask)`);     
+                    console.log(`Setting new price to ${newPrice} (at current ask)`);
 
-                    // Create new orders with improved prices
-                    console.log(`Creating new ${action} order with improved price...`);   
+                    console.log(`Creating new ${action} order with improved price...`);
                     const newOrderResult = await this.exchange.createOrder(
                         symbol,
                         action,
@@ -301,35 +304,36 @@ class RandomQuantityP2PB2BBot extends AutoTradingBot2 {
 
                     if (!newOrderResult || !newOrderResult.orderId) {
                         console.error('Failed to create new first order');
+                        this.removeFirstLegOrderTracking(action, prevFirstId);
+                        this.removeMatchingLegTracking(matchingSide, prevMatchId);
                         return false;
                     }
 
                     console.log(`New first order created successfully with ID: ${newOrderResult.orderId}`);
 
-                    // Create new matching order
-                    console.log(`Creating new matching ${matchingSide} order...`);        
-                    const newMatchingOrderResult = await this.exchange.createOrder(       
+                    console.log(`Creating new matching ${matchingSide} order...`);
+                    const newMatchingOrderResult = await this.exchange.createOrder(
                         symbol,
                         matchingSide,
                         tokenAmount,
                         newPrice
                     );
 
-                    if (!newMatchingOrderResult || !newMatchingOrderResult.orderId) {     
+                    if (!newMatchingOrderResult || !newMatchingOrderResult.orderId) {
                         console.error('Failed to create new matching order');
-
-                        // Try to cancel the new first order
                         console.log('Cancelling the new first order...');
                         await this.exchange.cancelOrder(newOrderResult.orderId, symbol.replace('/', '_'));
-
+                        this.removeFirstLegOrderTracking(action, newOrderResult.orderId);
+                        this.removeMatchingLegTracking(matchingSide, prevMatchId);
                         return false;
                     }
 
                     console.log(`New matching order created successfully with ID: ${newMatchingOrderResult.orderId}`);
 
-                    // Update order IDs for continued status checking
                     orderResult.orderId = newOrderResult.orderId;
                     matchingOrderResult.orderId = newMatchingOrderResult.orderId;
+                    this.replaceFirstLegOrderId(action, prevFirstId, orderResult.orderId, newPrice);
+                    this.replaceMatchingLegOrderId(matchingSide, prevMatchId, matchingOrderResult.orderId);
                 }
 
                 // Wait before checking again
@@ -340,10 +344,12 @@ class RandomQuantityP2PB2BBot extends AutoTradingBot2 {
             if (!areOrdersFilled) {
                 console.log(`\nOrders not filled after ${maxRetries} attempts, cancelling...`);
                 try {
+                    this.removeFirstLegOrderTracking(action, orderResult.orderId);
+                    this.removeMatchingLegTracking(matchingSide, matchingOrderResult.orderId);
                     await this.exchange.cancelOrder(orderResult.orderId, symbol.replace('/', '_'));
                     await this.exchange.cancelOrder(matchingOrderResult.orderId, symbol.replace('/', '_'));
                 } catch (cancelError) {
-                    console.error('Error cancelling orders:', cancelError.message);       
+                    console.error('Error cancelling orders:', cancelError.message);
                 }
                 return false;
             }
