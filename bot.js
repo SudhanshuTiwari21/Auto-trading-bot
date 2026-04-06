@@ -306,6 +306,38 @@ class AutoTradingBot {
         }
     }
 
+    async cancelOrder(orderId) {
+        try {
+            console.log(`\nCancelling unfilled order: ${orderId}`);
+            
+            const endpoint = `orders/${orderId}`;
+            const url = `${this.azbitUrl}${endpoint}`;
+            
+            // Generate signature for DELETE request
+            const signature = this.generateSignature(url, '');
+            
+            const response = await axios.delete(url, {
+                headers: {
+                    'API-PublicKey': this.azbitApiKey,
+                    'API-Signature': signature,
+                    'Content-Type': 'application/json'
+                }
+            });
+            
+            console.log(`Order ${orderId} cancelled successfully`);
+            console.log('Response:', response.data);
+            
+            return true;
+        } catch (error) {
+            console.error(`Error cancelling order ${orderId}:`, error.message);
+            if (error.response) {
+                console.error('Status:', error.response.status);
+                console.error('Response Data:', error.response.data);
+            }
+            return false;
+        }
+    }
+
     async createOrder(symbol, side, amount, price) {
         try {
             const orderData = {
@@ -452,7 +484,7 @@ class AutoTradingBot {
                 console.log('Matching Order ID:', matchingOrderId);
 
                 // Maximum retries and delay between checks
-                const maxRetries = 5;
+                const maxRetries = 5; // Increased from 3 to 5 retries
                 const checkDelay = 2000; // 2 seconds
                 let retryCount = 0;
                 let bothOrdersFilled = false;
@@ -507,10 +539,58 @@ class AutoTradingBot {
                     }
 
                     retryCount++;
-                }
-
-                if (!bothOrdersFilled && !this.isShuttingDown) {
-                    console.log('\nOrders not filled after maximum retries');
+                    
+                    // If we've reached the maximum retries and orders aren't filled
+                    if (retryCount >= maxRetries && !bothOrdersFilled) {
+                        console.log('\n⚠️ Orders not filled after maximum retries. Cancelling unfilled orders...');
+                        
+                        // Cancel first order if not filled
+                        if (!firstOrderFilled) {
+                            console.log(`Cancelling first order ${orderData} (${firstOrderStatus.filled}% filled)`);
+                            const cancelResult = await this.cancelOrder(orderData);
+                            if (cancelResult) {
+                                console.log(`Successfully cancelled order ${orderData}`);
+                            } else {
+                                console.log(`Failed to cancel order ${orderData}`);
+                            }
+                        }
+                        
+                        // Cancel matching order if not filled
+                        if (!matchingOrderFilled) {
+                            console.log(`Cancelling matching order ${matchingOrderId} (${matchingOrderStatus.filled}% filled)`);
+                            const cancelResult = await this.cancelOrder(matchingOrderId);
+                            if (cancelResult) {
+                                console.log(`Successfully cancelled order ${matchingOrderId}`);
+                            } else {
+                                console.log(`Failed to cancel order ${matchingOrderId}`);
+                            }
+                        }
+                        
+                        // Try creating new orders at the exact ask price to increase fill probability
+                        console.log('\nCreating new orders at exact ask price to increase fill probability...');
+                        
+                        // Get fresh market price
+                        const orderBook = await this.getOrderBook(symbol);
+                        if (orderBook) {
+                            const exactAskPrice = orderBook.bestAsk.toString();
+                            console.log(`Using exact ask price: ${exactAskPrice}`);
+                            
+                            // Create new orders at exact ask price
+                            await this.executeTradeAction(action, symbol, exactAskPrice, formattedAmount);
+                        } else {
+                            console.log('Failed to get fresh market price, will retry in next cycle');
+                            
+                            // Wait before starting new cycle
+                            console.log('\nWaiting 30 seconds before starting new cycle...');
+                            await new Promise(resolve => setTimeout(resolve, 30000));
+                            
+                            if (!this.isShuttingDown) {
+                                console.log('\n=== Starting New Cycle ===');
+                                this.lastAction = action;
+                                await this.executeTrade('Azbit', symbol);
+                            }
+                        }
+                    }
                 }
             }
 

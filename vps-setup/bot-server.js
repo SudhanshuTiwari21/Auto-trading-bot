@@ -25,7 +25,7 @@ app.use(cors({
 app.use(express.json());
 
 // Path to bot scripts - adjust these paths based on your VPS setup
-const BOT_SCRIPTS_DIR = process.env.BOT_SCRIPTS_DIR || path.join(__dirname, '..');
+const BOT_SCRIPTS_DIR = process.env.BOT_SCRIPTS_DIR || path.join('/root', 'auto-trading-bot');
 
 // Path to settings file
 const SETTINGS_FILE_PATH = path.join(BOT_SCRIPTS_DIR, '.env');
