@@ -72,7 +72,7 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ success: false, error: 'Invalid bot ID' }, { status: 400 });
     }
 
-    if (!action || !['start', 'stop'].includes(action)) {
+    if (!action || !['start', 'stop'̦̦̦̦].includes(action)) {
       return NextResponse.json({ success: false, error: 'Invalid action' }, { status: 400 });
     }
 

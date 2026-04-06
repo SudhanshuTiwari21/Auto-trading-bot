@@ -59,6 +59,17 @@ class AutoTradingBot2 {
             );
             // When true: run checkAndReplenishBuys once per completed cycle (reduces overlap with same-cycle self-matches)
             this.REPLENISH_AFTER_CYCLE_ONLY = process.env.REPLENISH_AFTER_CYCLE_ONLY === 'true';
+            // Stop the process when free USDT (after reserve) falls below threshold — client request when no USDT for buys
+            this.STOP_BOT_ON_LOW_USDT = process.env.STOP_BOT_ON_LOW_USDT === 'true';
+            this.MIN_FREE_USDT_TO_RUN = Math.max(
+                0,
+                parseFloat(process.env.MIN_FREE_USDT_TO_RUN || '1')
+            );
+            // Fraction of post-reserve USDT for one defence sweep (sell-side buy / buy-side sell)
+            this.DEFENCE_BUDGET_PCT = Math.min(
+                1,
+                Math.max(0.01, parseFloat(process.env.DEFENCE_BUDGET_PCT || '0.25'))
+            );
 
             // Add cycle tracking for random order quantities
             this.currentCycle = 0;
@@ -76,6 +87,11 @@ class AutoTradingBot2 {
             }
             if (this.REPLENISH_AFTER_CYCLE_ONLY) {
                 console.log('✓ Replenish: after each full cycle only (REPLENISH_AFTER_CYCLE_ONLY=true)');
+            }
+            if (this.STOP_BOT_ON_LOW_USDT) {
+                console.log(
+                    `✓ Will stop bot when free USDT < ${this.MIN_FREE_USDT_TO_RUN} (after ${this.USDT_RESERVE} reserve) — STOP_BOT_ON_LOW_USDT=true`
+                );
             }
 
             // Setup graceful shutdown
@@ -532,6 +548,11 @@ class AutoTradingBot2 {
                     `\n[DEFENCE] Detected best ask ${bestAsk} below our main sell ${refSell}. ` +
                     'Buying here to defend our sell level.'
                 );
+            } else if (process.env.LOG_DEFENCE_VERBOSE === 'true' && refSell && bestAsk >= refSell) {
+                console.log(
+                    `[DEFENCE] No sell-side sweep: best ask ${bestAsk} >= our main sell ${refSell} ` +
+                    '(defence only buys when market ask is below our reference; aggressive self-quotes below market skip this).'
+                );
             }
 
             if (refBuy && bestBid > refBuy) {
@@ -571,18 +592,25 @@ class AutoTradingBot2 {
 
             const availableForDefence = usdtBalance - this.USDT_RESERVE;
             if (availableForDefence <= 0) {
-                console.log('[DEFENCE] USDT below reserve, skipping sell-side defence');
+                console.log('[DEFENCE] USDT below reserve, skipping sell-side defence (no free USDT for defence buys)');
                 return;
             }
 
-            // Use only a small fraction of available USDT per defence sweep (e.g. 10%)
-            const defenceBudget = availableForDefence * 0.1;
+            // Use DEFENCE_BUDGET_PCT of post-reserve USDT, but at least min-notional if affordable (avoids 10% of tiny balance < 1 USDT)
+            let defenceBudget = availableForDefence * this.DEFENCE_BUDGET_PCT;
+            if (availableForDefence >= this.MIN_NOTIONAL_USDT) {
+                defenceBudget = Math.max(defenceBudget, Math.min(this.MIN_NOTIONAL_USDT, availableForDefence));
+            }
+            defenceBudget = Math.min(defenceBudget, availableForDefence);
+
             const price = bestAsk; // we buy at best ask to take the undercut
             const rawAmount = defenceBudget / price;
             const amount = Math.max(0.1, parseFloat(rawAmount.toFixed(1))); // step 0.1 BRIL
 
             if (amount * price < this.MIN_NOTIONAL_USDT) {
-                console.log('[DEFENCE] Computed buy too small, skipping sell-side defence');
+                console.log(
+                    `[DEFENCE] Computed buy too small (${(amount * price).toFixed(4)} USDT < ${this.MIN_NOTIONAL_USDT}), skipping sell-side defence`
+                );
                 return;
             }
 
@@ -961,6 +989,20 @@ class AutoTradingBot2 {
             if (this.isShuttingDown) {
                 console.log('Bot is shutting down, not executing trade');
                 return;
+            }
+
+            if (this.STOP_BOT_ON_LOW_USDT) {
+                const spendable = await this.getSpendableUsdt();
+                const free = spendable - this.USDT_RESERVE;
+                if (free < this.MIN_FREE_USDT_TO_RUN) {
+                    console.log(
+                        `\n[STOP] Free USDT after reserve: ${free.toFixed(4)} (spendable ${spendable.toFixed(4)}, reserve ${this.USDT_RESERVE}) ` +
+                        `< MIN_FREE_USDT_TO_RUN (${this.MIN_FREE_USDT_TO_RUN}). Stopping bot.`
+                    );
+                    this.isShuttingDown = true;
+                    process.exit(0);
+                    return;
+                }
             }
 
             // Initialize cycle if this is the first run
