@@ -102,6 +102,43 @@ class P2PB2BExchange {
         }
     }
 
+    /** Free balance only — use for sizing new orders (available + freeze overstates spendable USDT/BRIL). */
+    async getAvailableBalance(currency = 'USDT') {
+        try {
+            if (process.env.TEST_MODE === 'true') {
+                if (currency === 'USDT') {
+                    return parseFloat(process.env.TEST_BALANCE || '100');
+                }
+                return parseFloat(process.env.TEST_BRIL_BALANCE || process.env.TEST_BALANCE || '100');
+            }
+
+            const endpoint = '/api/v2/account/balances';
+            const requestBody = { request: endpoint, nonce: Date.now() };
+            const payload = Buffer.from(JSON.stringify(requestBody)).toString('base64');
+            const signature = this.generateSignature(payload);
+            const headers = {
+                'Content-Type': 'application/json',
+                'X-TXC-APIKEY': this.apiKey,
+                'X-TXC-PAYLOAD': payload,
+                'X-TXC-SIGNATURE': signature
+            };
+
+            const response = await axios.post(`${this.baseUrl}${endpoint}`, requestBody, { headers });
+            if (!response.data.success) {
+                throw new Error(`P2PB2B API Error: ${JSON.stringify(response.data)}`);
+            }
+            const balances = response.data.result;
+            const row = balances[currency];
+            if (!row) {
+                throw new Error(`Balance for ${currency} not found`);
+            }
+            return parseFloat(row.available);
+        } catch (error) {
+            console.error('Error getting P2PB2B available balance:', error.message);
+            throw error;
+        }
+    }
+
     async getMarketPrice(market) {
         try {
             const formattedMarket = this.formatMarketSymbol(market);

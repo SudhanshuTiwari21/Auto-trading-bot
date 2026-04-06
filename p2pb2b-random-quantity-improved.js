@@ -6,8 +6,8 @@ class RandomQuantityP2PB2BBot extends AutoTradingBot2 {
         super();
         console.log('Initializing P2PB2B Trading Bot (Random Quantity)');
 
-        // Define min and max token amount for random quantity
-        this.minTokenAmount = 1.10;
+        // Define min and max token amount for random quantity (exchange step_size 0.1)
+        this.minTokenAmount = 0.1;
         this.maxTokenAmount = 5.0; // Set to 5.0 as requested
         
         // Define price variation parameters for randomization
@@ -85,7 +85,7 @@ class RandomQuantityP2PB2BBot extends AutoTradingBot2 {
             // Generate a random price with variation
             price = this.getRandomPrice(askPrice, action);
 
-            // Generate random token amount between 1.10 and 5.0
+            // Generate random token amount between minTokenAmount and maxTokenAmount
             tokenAmount = (await this.getRandomTokenAmount(symbol, parseFloat(price))).toFixed(1);
             console.log(`Random token amount: ${tokenAmount}`);
 

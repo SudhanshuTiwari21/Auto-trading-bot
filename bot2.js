@@ -32,9 +32,13 @@ class AutoTradingBot2 {
             this.ourReplenishBuyOrderIds = new Set();
             /** Sell-ladder orders — do not overwrite ourSellPrice (Step 2) */
             this.ourLadderSellOrderIds = new Set();
-            // Basic config for reserves and ladders (can move to env later)
-            this.USDT_RESERVE = 25;   // Keep 25 USDT aside
-            this.BRIL_RESERVE = 25;   // Keep 25 BRIL aside (used later)
+            // Reserves: default 25; for small balances set USDT_RESERVE / BRIL_RESERVE in .env (e.g. 0 or 1)
+            {
+                const u = parseFloat(process.env.USDT_RESERVE ?? '25');
+                const b = parseFloat(process.env.BRIL_RESERVE ?? '25');
+                this.USDT_RESERVE = Number.isFinite(u) ? Math.max(0, u) : 25;
+                this.BRIL_RESERVE = Number.isFinite(b) ? Math.max(0, b) : 25;
+            }
             this.MIN_BUY_LADDER_ORDERS = 3;
             this.BUY_LADDER_STEP = 0.01;
             // Replenish caps (Step 1): avoid spending entire USDT in one replenish event
@@ -47,6 +51,11 @@ class AutoTradingBot2 {
             this.REPLENISH_MAX_LEG_USDT = Math.max(
                 1,
                 parseFloat(process.env.REPLENISH_MAX_LEG_USDT || '50')
+            );
+            // P2PB2B min_total is typically 1 USDT — legs below this are rejected or skipped
+            this.MIN_NOTIONAL_USDT = Math.max(
+                0.01,
+                parseFloat(process.env.MIN_NOTIONAL_USDT || '1')
             );
 
             // Add cycle tracking for random order quantities
@@ -149,6 +158,46 @@ class AutoTradingBot2 {
             
             return 0;
         }
+    }
+
+    /** USDT that can actually be spent on new orders (not frozen). */
+    async getSpendableUsdt() {
+        try {
+            if (typeof this.exchange.getAvailableBalance === 'function') {
+                return await this.exchange.getAvailableBalance('USDT');
+            }
+        } catch (e) {
+            console.error('getSpendableUsdt:', e.message);
+        }
+        return this.getBalance();
+    }
+
+    /** BRIL that can be sold on new orders (not frozen). */
+    async getSpendableBril() {
+        try {
+            if (typeof this.exchange.getAvailableBalance === 'function') {
+                return await this.exchange.getAvailableBalance('BRIL');
+            }
+        } catch (e) {
+            console.error('getSpendableBril:', e.message);
+        }
+        try {
+            return await this.exchange.getBalance('BRIL');
+        } catch (e2) {
+            return 0;
+        }
+    }
+
+    /**
+     * Split event budget across up to maxLegs orders so each leg is at least minNotional USDT when possible.
+     */
+    computeLegUsdBudget(totalEventBudget, maxLegs, maxLegUsd, minNotional) {
+        if (totalEventBudget < minNotional) return null;
+        const n = Math.min(maxLegs, Math.floor(totalEventBudget / minNotional));
+        if (n < 1) return null;
+        const perLeg = Math.min(totalEventBudget / n, maxLegUsd);
+        if (perLeg < minNotional) return null;
+        return { n, perLeg };
     }
 
     async getOrderBook(symbol) {
@@ -317,13 +366,13 @@ class AutoTradingBot2 {
                 return;
             }
 
-            const balance = await this.getBalance();
-            if (!balance || Number.isNaN(balance)) {
-                console.log('Cannot replenish buys, invalid USDT balance');
+            const spendable = await this.getSpendableUsdt();
+            if (!spendable || Number.isNaN(spendable)) {
+                console.log('Cannot replenish buys, invalid spendable USDT');
                 return;
             }
 
-            const availableForBuys = balance - this.USDT_RESERVE;
+            const availableForBuys = spendable - this.USDT_RESERVE;
             if (availableForBuys <= 0) {
                 console.log(`USDT available for buys (${availableForBuys}) is <= 0 after reserve, skipping replenishment`);
                 return;
@@ -334,13 +383,24 @@ class AutoTradingBot2 {
                 availableForBuys * this.REPLENISH_BUDGET_PCT,
                 availableForBuys
             );
-            const rawPerLeg = totalEventBudget / this.MIN_BUY_LADDER_ORDERS;
-            const perOrderBudget = Math.min(rawPerLeg, this.REPLENISH_MAX_LEG_USDT);
+            const legInfo = this.computeLegUsdBudget(
+                totalEventBudget,
+                this.MIN_BUY_LADDER_ORDERS,
+                this.REPLENISH_MAX_LEG_USDT,
+                this.MIN_NOTIONAL_USDT
+            );
+            if (!legInfo) {
+                console.log(
+                    `Replenish skipped: event budget ${totalEventBudget.toFixed(4)} USDT cannot split into legs ≥ ${this.MIN_NOTIONAL_USDT} USDT (min notional)`
+                );
+                return;
+            }
+            const { n: legCount, perLeg: perOrderBudget } = legInfo;
 
             console.log(
-                `\nReplenishing buys around price ${basePrice} | available USDT (after reserve): ${availableForBuys.toFixed(4)} | ` +
+                `\nReplenishing buys around price ${basePrice} | spendable USDT (after reserve): ${availableForBuys.toFixed(4)} | ` +
                 `event budget: ${totalEventBudget.toFixed(4)} (${(this.REPLENISH_BUDGET_PCT * 100).toFixed(0)}% of available) | ` +
-                `per leg cap: ${this.REPLENISH_MAX_LEG_USDT} USDT → using ${perOrderBudget.toFixed(4)} USDT per leg`
+                `${legCount} leg(s), ~${perOrderBudget.toFixed(4)} USDT per leg (min ${this.MIN_NOTIONAL_USDT}, cap ${this.REPLENISH_MAX_LEG_USDT})`
             );
 
             // Target prices for ladder
@@ -350,16 +410,15 @@ class AutoTradingBot2 {
                 Math.max(basePrice - 2 * this.BUY_LADDER_STEP, 0.000001),
             ];
 
-            for (const p of prices) {
-                // Avoid nonsense prices
+            for (let i = 0; i < legCount && i < prices.length; i++) {
+                const p = prices[i];
                 if (!p || p <= 0) continue;
 
                 const amount = perOrderBudget / p;
                 const roundedAmount = Math.max(0.1, parseFloat(amount.toFixed(1))); // BRIL step_size is 0.1
 
-                // Skip too-small orders
-                if (roundedAmount * p < 1) { // rough min total check
-                    console.log(`Skipping tiny buy at ${p}, total ${roundedAmount * p} USDT`);
+                if (roundedAmount * p < this.MIN_NOTIONAL_USDT) {
+                    console.log(`Skipping buy at ${p}, total ${roundedAmount * p} USDT < min notional`);
                     continue;
                 }
 
@@ -433,7 +492,7 @@ class AutoTradingBot2 {
             const refSell = this.ourMainSellPrice ?? this.ourSellPrice;
             if (!refSell || bestAsk >= refSell) return;
 
-            const usdtBalance = await this.getBalance();
+            const usdtBalance = await this.getSpendableUsdt();
             if (!usdtBalance || Number.isNaN(usdtBalance)) {
                 console.log('[DEFENCE] Cannot defend sell side, invalid USDT balance');
                 return;
@@ -451,7 +510,7 @@ class AutoTradingBot2 {
             const rawAmount = defenceBudget / price;
             const amount = Math.max(0.1, parseFloat(rawAmount.toFixed(1))); // step 0.1 BRIL
 
-            if (amount * price < 1) {
+            if (amount * price < this.MIN_NOTIONAL_USDT) {
                 console.log('[DEFENCE] Computed buy too small, skipping sell-side defence');
                 return;
             }
@@ -480,7 +539,7 @@ class AutoTradingBot2 {
             // Try to get BRIL balance from exchange, fall back to a safe default if unsupported
             let brilBalance = 0;
             try {
-                brilBalance = await this.exchange.getBalance('BRIL');
+                brilBalance = await this.getSpendableBril();
             } catch (e) {
                 console.log('[DEFENCE] Could not fetch BRIL balance from exchange, skipping buy-side defence');
                 return;
@@ -499,9 +558,10 @@ class AutoTradingBot2 {
 
             // Use only a small fraction of available BRIL per defence sweep (e.g. 10%)
             const defenceAmount = availableBril * 0.1;
-            const amount = Math.max(0.1, parseFloat(defenceAmount.toFixed(1))); // step 0.1 BRIL
+            let amount = Math.max(0.1, parseFloat(defenceAmount.toFixed(1))); // step 0.1 BRIL
+            amount = Math.min(amount, Math.max(0.1, parseFloat(availableBril.toFixed(1))));
 
-            if (amount * bestBid < 1) {
+            if (amount * bestBid < this.MIN_NOTIONAL_USDT) {
                 console.log('[DEFENCE] Computed sell too small, skipping buy-side defence');
                 return;
             }
@@ -527,10 +587,9 @@ class AutoTradingBot2 {
             const refSell = this.ourMainSellPrice ?? this.ourSellPrice;
             if (!refSell) return;
 
-            // Fetch BRIL balance
             let brilBalance = 0;
             try {
-                brilBalance = await this.exchange.getBalance('BRIL');
+                brilBalance = await this.getSpendableBril();
             } catch (e) {
                 console.log('[LADDER] Could not fetch BRIL balance, skipping sell ladder');
                 return;
@@ -558,7 +617,7 @@ class AutoTradingBot2 {
                 const amount = Math.max(0.1, parseFloat(perLevel.toFixed(1))); // step 0.1 BRIL
 
                 // Skip too-small orders
-                if (amount * price < 1) {
+                if (amount * price < this.MIN_NOTIONAL_USDT) {
                     console.log(`[LADDER] Sell level ${i} too small, skipping`);
                     continue;
                 }
@@ -581,7 +640,7 @@ class AutoTradingBot2 {
             const refSell = this.ourMainSellPrice ?? this.ourSellPrice;
             if (!refSell) return;
 
-            const usdtBalance = await this.getBalance();
+            const usdtBalance = await this.getSpendableUsdt();
             if (!usdtBalance || Number.isNaN(usdtBalance)) {
                 console.log('[LADDER] Invalid USDT balance, skipping buy ladder');
                 return;
@@ -593,27 +652,37 @@ class AutoTradingBot2 {
                 return;
             }
 
-            // Same caps as replenishBuys (REPLENISH_BUDGET_PCT + REPLENISH_MAX_LEG_USDT)
             const levels = 3;
             const totalEventBudget = Math.min(
                 excessUsdt * this.REPLENISH_BUDGET_PCT,
                 excessUsdt
             );
-            const rawPerLeg = totalEventBudget / levels;
-            const perLevelBudget = Math.min(rawPerLeg, this.REPLENISH_MAX_LEG_USDT);
+            const legInfo = this.computeLegUsdBudget(
+                totalEventBudget,
+                levels,
+                this.REPLENISH_MAX_LEG_USDT,
+                this.MIN_NOTIONAL_USDT
+            );
+            if (!legInfo) {
+                console.log(
+                    `[LADDER] Buy ladder skipped: budget ${totalEventBudget.toFixed(4)} USDT cannot split into legs ≥ ${this.MIN_NOTIONAL_USDT} USDT`
+                );
+                return;
+            }
+            const { n: legCount, perLeg: perLevelBudget } = legInfo;
 
             console.log(
-                `\n[LADDER] Maintaining buy ladder | excess USDT (after reserve): ${excessUsdt.toFixed(2)} | ` +
+                `\n[LADDER] Maintaining buy ladder | spendable USDT (after reserve): ${excessUsdt.toFixed(2)} | ` +
                 `event budget: ${totalEventBudget.toFixed(4)} (${(this.REPLENISH_BUDGET_PCT * 100).toFixed(0)}% of excess) | ` +
-                `per leg cap: ${this.REPLENISH_MAX_LEG_USDT} USDT → using ${perLevelBudget.toFixed(4)} USDT per leg`
+                `${legCount} leg(s), ~${perLevelBudget.toFixed(4)} USDT per leg`
             );
 
             const base = refSell;
             const lower = base * (1 - 0.10); // 10% below main sell
             const upper = base * (1 - 0.02); // 2% below main sell
 
-            for (let i = 0; i < levels; i++) {
-                const t = i / (levels - 1 || 1);
+            for (let i = 0; i < legCount; i++) {
+                const t = legCount <= 1 ? 0 : i / (legCount - 1);
                 const price = upper - t * (upper - lower); // from upper down to lower
 
                 if (price <= 0) continue;
@@ -621,7 +690,7 @@ class AutoTradingBot2 {
                 const rawAmount = perLevelBudget / price;
                 const amount = Math.max(0.1, parseFloat(rawAmount.toFixed(1)));
 
-                if (amount * price < 1) {
+                if (amount * price < this.MIN_NOTIONAL_USDT) {
                     console.log(`[LADDER] Buy level ${i + 1} too small, skipping`);
                     continue;
                 }
