@@ -422,38 +422,21 @@ class P2PB2BExchange {
                 };
             }
 
-            // First try to get order details using account/order endpoint
-            // This seems more reliable than the order/status endpoint
+            // Prefer account/order when it returns deal rows (reliable for completed legs).
+            // If records are empty (common right after submit, or some alpha markets), fall through
+            // to order/status — otherwise we always reported 0% and never hit the fallback.
             try {
                 console.log(`Getting details for order ${orderId} using account/order endpoint...`);
                 const orderDetails = await this.getOrderDetails(orderId);
-
-                // If we have order details, use them to determine status
-                if (orderDetails) {
-                    // Determine if the order is completed based on trades
-                    const isCompleted = orderDetails.trades && orderDetails.trades.length > 0;
-                    const status = isCompleted ? 'completed' : 'open';
-
-                    // If we have trades, calculate filled percentage
-                    let filled = '0';
-                    let amount = '0';
-                    let price = '0';
-                    let remaining = '0';
-
-                    if (isCompleted) {
-                        filled = '100';
-                        amount = orderDetails.totalAmount || '0';
-                        price = orderDetails.trades[0]?.price || '0';
-                        remaining = '0';
-                    }
-
+                const trades = orderDetails?.trades;
+                if (trades && trades.length > 0) {
                     return {
                         status: 'success',
-                        filled: filled,
-                        amount: amount,
-                        price: price,
-                        side: 'unknown', // We don't get side from account/order
-                        remaining: remaining
+                        filled: '100',
+                        amount: orderDetails.totalAmount || '0',
+                        price: trades[0]?.price || '0',
+                        side: 'unknown',
+                        remaining: '0'
                     };
                 }
             } catch (detailsError) {
