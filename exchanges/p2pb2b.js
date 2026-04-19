@@ -139,6 +139,63 @@ class P2PB2BExchange {
         }
     }
 
+    /**
+     * Some pairs (e.g. BRIL_USDT) are listed under /api/v2/alpha/markets only (`enabledInPublicAPI: false`).
+     * Public ticker/market return 400 for those; use /api/v2/alpha/ticker and /api/v2/alpha/market.
+     * @see https://api.p2pb2b.com/api/v2/alpha/markets
+     */
+    async _fetchTicker(formattedMarket) {
+        let response;
+        try {
+            response = await axios.get(
+                `${this.baseUrl}/api/v2/public/ticker?market=${formattedMarket}`
+            );
+            if (response.data?.success && response.data.result) {
+                return response;
+            }
+        } catch (e) {
+            const status = e.response?.status;
+            if (status !== 400 && status !== 404) {
+                throw e;
+            }
+        }
+        response = await axios.get(
+            `${this.baseUrl}/api/v2/alpha/ticker?market=${formattedMarket}`
+        );
+        if (!response.data?.success || !response.data.result) {
+            throw new Error(
+                `P2PB2B ticker error: ${response.data?.message || 'alpha ticker failed'}`
+            );
+        }
+        return response;
+    }
+
+    async _fetchMarketMeta(formattedMarket) {
+        let response;
+        try {
+            response = await axios.get(
+                `${this.baseUrl}/api/v2/public/market?market=${formattedMarket}`
+            );
+            if (response.data?.success && response.data.result) {
+                return response;
+            }
+        } catch (e) {
+            const status = e.response?.status;
+            if (status !== 400 && status !== 404) {
+                throw e;
+            }
+        }
+        response = await axios.get(
+            `${this.baseUrl}/api/v2/alpha/market?market=${formattedMarket}`
+        );
+        if (!response.data?.success || !response.data.result) {
+            throw new Error(
+                `P2PB2B market info error: ${response.data?.message || 'alpha market failed'}`
+            );
+        }
+        return response;
+    }
+
     async getMarketPrice(market) {
         try {
             const formattedMarket = this.formatMarketSymbol(market);
@@ -150,18 +207,13 @@ class P2PB2BExchange {
                 throw new Error(`Market ${formattedMarket} not found. Available markets: ${markets.join(', ')}`);
             }
 
-            const response = await axios.get(
-                `${this.baseUrl}/api/v2/public/ticker?market=${formattedMarket}`
-            );
-
-            if (!response.data.success) {
-                throw new Error(`P2PB2B API Error: ${response.data.message}`);
-            }
+            const response = await this._fetchTicker(formattedMarket);
+            const r = response.data.result;
 
             return {
-                bid: parseFloat(response.data.result.bid),
-                ask: parseFloat(response.data.result.ask),
-                last: parseFloat(response.data.result.last)
+                bid: parseFloat(r.bid),
+                ask: parseFloat(r.ask),
+                last: parseFloat(r.last)
             };
         } catch (error) {
             console.error('Error getting P2PB2B market price:', error.message);
@@ -170,28 +222,33 @@ class P2PB2BExchange {
     }
 
     async getMarkets() {
+        const names = new Set();
         try {
-            const response = await axios.get(`${this.baseUrl}/api/v2/public/markets`);
-            if (!response.data.success) {
-                throw new Error(`P2PB2B API Error: ${response.data.message}`);
+            const pub = await axios.get(`${this.baseUrl}/api/v2/public/markets`);
+            if (pub.data?.success && Array.isArray(pub.data.result)) {
+                pub.data.result.forEach((m) => names.add(m.name));
             }
-            return response.data.result.map(m => m.name);
         } catch (error) {
-            console.error('Error getting markets:', error.message);
-            throw error;
+            console.error('Error getting public markets:', error.message);
         }
+        try {
+            const alpha = await axios.get(`${this.baseUrl}/api/v2/alpha/markets`);
+            if (alpha.data?.success && Array.isArray(alpha.data.result)) {
+                alpha.data.result.forEach((m) => names.add(m.name));
+            }
+        } catch (error) {
+            console.error('Error getting alpha markets:', error.message);
+        }
+        if (names.size === 0) {
+            throw new Error('Could not load markets from P2PB2B (public + alpha)');
+        }
+        return [...names].sort();
     }
 
     async getMarketLimits(market) {
         try {
             const formattedMarket = this.formatMarketSymbol(market);
-            const response = await axios.get(
-                `${this.baseUrl}/api/v2/public/market?market=${formattedMarket}`
-            );
-
-            if (!response.data.success) {
-                throw new Error(`Failed to get market info: ${JSON.stringify(response.data)}`);
-            }
+            const response = await this._fetchMarketMeta(formattedMarket);
 
             const marketInfo = response.data.result;
             console.log(`Market limits for ${market}:`, marketInfo.limits);
